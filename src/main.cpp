@@ -140,14 +140,12 @@ void esp_i2s_off(){
 
     if(is_i2s_configured == true){
 
-        xSemaphoreTake(i2sMutex,portMAX_DELAY);
         i2s_driver_uninstall(I2S_NUM_0); //stop & destroy i2s driver
         Serial.println("I2S uninstalled");
         gpio_reset_pin((gpio_num_t)I2S_BCLK);
         gpio_reset_pin((gpio_num_t)I2S_LRC);
         gpio_reset_pin((gpio_num_t)I2S_DOUT);
         is_i2s_configured = false;
-        xSemaphoreGive(i2sMutex);
     }
   
 
@@ -157,7 +155,6 @@ void esp_i2s_off(){
 
 void i2s_setUp(uint32_t sample_rate){
 
-    xSemaphoreTake(i2sMutex,portMAX_DELAY);
         if(is_i2s_configured) {
         esp_i2s_off();
         }
@@ -187,7 +184,6 @@ i2s_pin_config_t pin_config = {
   i2s_set_pin(I2S_NUM_0,&pin_config);
   i2s_set_clk(I2S_NUM_0,sample_rate,I2S_BITS_PER_SAMPLE_16BIT,I2S_CHANNEL_MONO);
   is_i2s_configured = true;
-  xSemaphoreGive(i2sMutex);
 
 
 }
@@ -195,20 +191,13 @@ i2s_pin_config_t pin_config = {
 
 void play_task(void *parameter) {
 
-
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait for signal
-        Serial.println("Inside Play Task");
         int mpUp = 0;
-        char buffer[10][10] = {"/zara.mp3","/PKV.mp3"};
+        char buffer[10][40] = {"/Raabta Kehte Hain Khuda Ne.mp3","/MemoryReboot.mp3","/INS.mp3","/MKV.mp3","/zara.mp3","/PKV.mp3"};
         bool stop = false;
+        bool changed = false;
         
         File file = SD.open(buffer[mpUp], "r");
-        if (!file) {
-            Serial.println("Failed to open MP3 file");
-            continue;
-        }
-       
+              
         // Init decoder, buffers (simplified for clarity)
         mp3dec_t mp3d;
         mp3dec_init(&mp3d);
@@ -216,58 +205,97 @@ void play_task(void *parameter) {
         short pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
         mp3dec_frame_info_t info = {};
         int buffered = 0;
-        float volumeMultiplier = 1.25f; // 2.0 = 2x gain
+        float volumeMultiplier = 0.45f; 
 
-        while (file.available() && !stopPlayback && stop == false) {
-            size_t n = file.read(input_buf + buffered, BUFFER_SIZE - buffered);
-            buffered += n;
+ 
+         while(!stopPlayback) {
 
-            int samples = mp3dec_decode_frame(&mp3d, input_buf, buffered, pcm, &info);
-            buffered -= info.frame_bytes;
-            memmove(input_buf, input_buf + info.frame_bytes, buffered);
-            if (digitalRead(PLAY) == HIGH) {
-                        delay(50);
-            if(digitalRead(PLAY) == HIGH){
-                mpUp+=1;
-                if(mpUp > 1){
-                    mpUp = 0;
-                }
-                file.close();               
-                mp3dec_init(&mp3d);
+                    Serial.println("Inside Play Task");
+                    
+                    if (!file) {
+                      if(changed == false){
+                        mpUp += 1;
+                        if(mpUp > 5) {mpUp = 0;}
 
-                buffered = 0;
-                memset(input_buf,0,sizeof(input_buf));
+                      }
+                      changed = false;
+                        
 
-                file = SD.open(buffer[mpUp], "r");
-                
-                
-            }
-         }
-            if (samples > 0) {
-                if (!is_i2s_configured) {
-                    i2s_setUp(info.hz);
-                }
+                        file = SD.open(buffer[mpUp], "r");
+                        if(!file){
+                            Serial.println("Failed to open MP3 file");
+                            continue;
 
-                // Downmix stereo to mono if needed
-                if (info.channels == 2) {
-                    for (int i = 0; i < samples; i++) {
-                        pcm[i] = (pcm[i * 2] + pcm[i * 2 + 1]) / 2;
-                        pcm[i] = (short)((float)pcm[i] * volumeMultiplier);
+                        }
 
                     }
+                    while (file.available()) {
+                      
+                        size_t n = file.read(input_buf + buffered, BUFFER_SIZE - buffered);
+                        buffered += n;
+
+                        int samples = mp3dec_decode_frame(&mp3d, input_buf, buffered, pcm, &info);
+                        buffered -= info.frame_bytes;
+                        memmove(input_buf, input_buf + info.frame_bytes, buffered);
+
+                        if (digitalRead(PLAY) == HIGH) {
+                                    delay(150);
+                        if(digitalRead(PLAY) == HIGH){
+                            mpUp+=1;
+                            Serial.println(mpUp);
+                            changed = true;
+                            if(mpUp > 5){
+                                mpUp = 0;
+                            }
+                            file.close();               
+                            mp3dec_init(&mp3d);
+
+                            buffered = 0;
+                            memset(input_buf,0,sizeof(input_buf));
+                            memset(pcm,0,sizeof(pcm));
+                            break;
+                            
+                        }
+                    }
+                        if (samples > 0) {
+                            if (!is_i2s_configured) {
+                                i2s_setUp(info.hz);
+                            }
+
+                            // Downmix stereo to mono if needed
+                            if (info.channels == 2) {
+                                for (int i = 0; i < samples; i++) {
+                                    pcm[i] = (pcm[i * 2] + pcm[i * 2 + 1]) / 2;
+                                    pcm[i] = (short)((float)pcm[i] * volumeMultiplier);
+
+                                }
+                            } else { // For mono keep it normal
+                                for (int i = 0; i < samples; i++) {
+                                      pcm[i] = (short)((float)pcm[i] * volumeMultiplier);
+
+                                  }
+                            }
+
+                            size_t bytes_written;
+                            i2s_write(I2S_NUM_0, pcm, samples * sizeof(short), &bytes_written, portMAX_DELAY);
+                        }
+                    }
+
+                    file.close();
+                    Serial.println("Playback changed or stopped");
+
                 }
 
-                size_t bytes_written;
-                i2s_write(I2S_NUM_0, pcm, samples * sizeof(short), &bytes_written, portMAX_DELAY);
-            }
-        }
-
-        file.close();
-       
-        Serial.println("Playback finished or stopped");
-
+                if(stopPlayback == true){
+                  if(file) file.close();
+                  esp_i2s_off();
+                  vTaskDelay(10 / portTICK_PERIOD_MS); // Give it time to exit cleanly
+                  playTaskHandle = NULL;
+                  vTaskDelete(NULL);
+                }
+                  
         
-    }
+   
 }
 
 void readRegister(uint8_t reg) {
@@ -296,9 +324,9 @@ void setup() {
   pinMode(SUP,INPUT_PULLDOWN);
   pinMode(PLAY,INPUT_PULLDOWN);
   pinMode(RadioOff,INPUT_PULLDOWN);
+
   Serial.begin(115200);
 
- // SPI.setFrequency(80000000);
 
   if(!SD.begin()){
     Serial.println("SD Card mounting failed");
@@ -343,8 +371,9 @@ void setup() {
   writeRegister(0x06,0b0000101010000000); //0b0000101010000000 = 0xA80
   delay(100);
   Serial.println("RDA5807FP initialized.");
-  i2sMutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(play_task,"MP3 PLAYER",32768,NULL,1,&playTaskHandle,0);
+
+  //i2sMutex = xSemaphoreCreateMutex();
+  //xTaskCreatePinnedToCore(play_task,"MP3 PLAYER",32768,NULL,1,&playTaskHandle,0);
 
 }
 
@@ -383,13 +412,26 @@ void loop() {
             writeRegister(0x05,0);
             delay(100);
             stopPlayback = false; // Reset stop flag
-            xTaskNotifyGive(playTaskHandle); // Signal MP3 playback
+            xTaskCreatePinnedToCore(play_task,"MP3 PLAYER",32768,NULL,1,&playTaskHandle,1);
+
             Serial.println("Radio Off");
             radio_off = true;
           } else if(radio_off == true){
             stopPlayback = true; // Reset stop flag
-            esp_i2s_off();
-            vTaskDelay(100 / portTICK_PERIOD_MS); // Give it time to exit cleanly
+            //esp_i2s_off();
+           // vTaskDelay(100 / portTICK_PERIOD_MS); // Give it time to exit cleanly
+           uint32_t timeout = 200;
+           while (playTaskHandle != NULL && timeout-- < 200);{
+            vTaskDelay(1/portTICK_PERIOD_MS);
+           }
+           
+            if(playTaskHandle != NULL){
+              if(is_i2s_configured == true){
+                esp_i2s_off();
+              }
+            vTaskDelete(playTaskHandle);
+
+            }
 
             writeRegister(0x02,0b1111000000001001); // Enable 
             delay(100);
